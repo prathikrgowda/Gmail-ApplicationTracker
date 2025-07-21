@@ -83,9 +83,3 @@ You can get a key from: https://platform.openai.com/account/api-keys
 ### 5. Authorize & Run
 - Run `processThreads()` once manually to trigger permission prompts
 - Then run `createScheduler()` to schedule the script to run every 30 minutes
-
----
-
-**Charan Reddy Kumar**  
-🔗 [LinkedIn](https://www.linkedin.com/in/charan-reddy-kumar-2b0319114/)  
-💻 [GitHub](https://github.com/CharanReddyKumar)
