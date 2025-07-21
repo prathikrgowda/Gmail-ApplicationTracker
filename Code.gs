@@ -1,0 +1,317 @@
+// Gmail Auto‑Labeler Script with LLM & Email Company Extraction, Drive CSV Logger, and Daily Summary
+
+/** Retrieves or creates a Gmail label by name. */
+function getOrCreateLabel(name) {
+  var label = GmailApp.getUserLabelByName(name);
+  return label || GmailApp.createLabel(name);
+}
+
+/** Escapes CSV fields. */
+function escapeCsv(field) {
+  var s = String(field || "").replace(/"/g, '""');
+  return /[",\n]/.test(s) ? '"' + s + '"' : s;
+}
+
+/** Calls OpenAI to extract course and application date from email text. */
+function extractCourseDate(text) {
+  var apiKey =
+    PropertiesService.getScriptProperties().getProperty("OPENAI_KEY");
+  var payload = {
+    model: "gpt-4o-mini",
+    temperature: 0,
+    max_tokens: 60,
+    messages: [
+      {
+        role: "system",
+        content:
+          'Extract the position or course name and the application date from this email. Return JSON: {"course":"...","date":"YYYY-MM-DD"}. Use empty strings if not found.',
+      },
+      { role: "user", content: text },
+    ],
+  };
+  var response = UrlFetchApp.fetch(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      method: "post",
+      contentType: "application/json",
+      headers: { Authorization: "Bearer " + apiKey },
+      payload: JSON.stringify(payload),
+    }
+  );
+  try {
+    var json = JSON.parse(
+      JSON.parse(response.getContentText()).choices[0].message.content
+    );
+    return { course: json.course || "", date: json.date || "" };
+  } catch (e) {
+    return { course: "", date: "" };
+  }
+}
+
+/** Calls OpenAI to extract company name from email text. */
+function extractCompanyLLM(text) {
+  var apiKey =
+    PropertiesService.getScriptProperties().getProperty("OPENAI_KEY");
+  var payload = {
+    model: "gpt-4o-mini",
+    temperature: 0,
+    max_tokens: 20,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Extract the company name referenced in this email. Reply with the company name only, or an empty string if none.",
+      },
+      { role: "user", content: text },
+    ],
+  };
+  var response = UrlFetchApp.fetch(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      method: "post",
+      contentType: "application/json",
+      headers: { Authorization: "Bearer " + apiKey },
+      payload: JSON.stringify(payload),
+    }
+  );
+  return JSON.parse(
+    response.getContentText()
+  ).choices[0].message.content.trim();
+}
+
+/** Extracts company from header email address. */
+function extractCompanyEmail(header) {
+  var match = header.match(/<([^>]+)>/);
+  var email = match ? match[1] : header;
+  var domain = email.split("@")[1] || "";
+  return domain.split(".")[0] || domain;
+}
+
+/** Appends a log line to 'JobAppsLog.csv'. */
+function appendLog(
+  timestamp,
+  direction,
+  threadId,
+  subject,
+  category,
+  emailCompany,
+  llmCompany,
+  course,
+  appDate
+) {
+  var fileName = "JobAppsLog.csv";
+  var files = DriveApp.getFilesByName(fileName);
+  var header =
+    "Timestamp,Direction,ThreadId,Subject,Category,EmailCompany,LLMCompany,Course,AppliedDate\n";
+  var line =
+    [
+      timestamp,
+      direction,
+      threadId,
+      subject,
+      category,
+      emailCompany || "",
+      llmCompany || "",
+      course || "",
+      appDate || "",
+    ]
+      .map(escapeCsv)
+      .join(",") + "\n";
+  if (files.hasNext()) {
+    var file = files.next();
+    file.setContent(file.getBlob().getDataAsString() + line);
+  } else {
+    DriveApp.createFile(fileName, header + line, MimeType.PLAIN_TEXT);
+  }
+}
+
+/** Appends a daily summary to 'JobAppsSummary.csv'. */
+function appendSummaryLog(dateStr, counts) {
+  var fileName = "JobAppsSummary.csv";
+  var files = DriveApp.getFilesByName(fileName);
+  var header =
+    "Date,IncomingApplied,IncomingRejected,IncomingInterview,IncomingAssessment,IncomingOther,SentApplied,SentFollowUp,SentOther\n";
+  var line =
+    [
+      dateStr,
+      counts.IncomingApplied,
+      counts.IncomingRejected,
+      counts.IncomingInterview,
+      counts.IncomingAssessment,
+      counts.IncomingOther,
+      counts.SentApplied,
+      counts.SentFollowUp,
+      counts.SentOther,
+    ].join(",") + "\n";
+  if (files.hasNext()) {
+    var file = files.next();
+    var content = file.getBlob().getDataAsString();
+    if (!content.includes(dateStr)) file.setContent(content + line);
+  } else {
+    DriveApp.createFile(fileName, header + line, MimeType.PLAIN_TEXT);
+  }
+}
+
+/** Classifies incoming email text. */
+function classifyIncoming(text) {
+  var apiKey =
+    PropertiesService.getScriptProperties().getProperty("OPENAI_KEY");
+  var payload = {
+    model: "gpt-4o-mini",
+    temperature: 0,
+    max_tokens: 10,
+    messages: [
+      { role: "system", content: "Classify incoming job-related emails." },
+      {
+        role: "system",
+        content:
+          "Reply with one label: Applied, Rejected, Interview, Assessment, Other.",
+      },
+      { role: "user", content: text },
+    ],
+  };
+  var res = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + apiKey },
+    payload: JSON.stringify(payload),
+  });
+  return JSON.parse(res.getContentText()).choices[0].message.content.trim();
+}
+
+/** Classifies outgoing email text. */
+function classifyOutgoing(text) {
+  var apiKey =
+    PropertiesService.getScriptProperties().getProperty("OPENAI_KEY");
+  var payload = {
+    model: "gpt-4o-mini",
+    temperature: 0,
+    max_tokens: 10,
+    messages: [
+      { role: "system", content: "Classify sent job emails." },
+      {
+        role: "system",
+        content:
+          "Reply with one label: Sent/Applied, Sent/FollowUp, Sent/Other.",
+      },
+      { role: "user", content: text },
+    ],
+  };
+  var res = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + apiKey },
+    payload: JSON.stringify(payload),
+  });
+  return JSON.parse(res.getContentText()).choices[0].message.content.trim();
+}
+
+/** Processes all unprocessed inbox and sent threads. */
+function processThreads() {
+  var userEmail = Session.getActiveUser().getEmail();
+  var labels = {
+    IncomingApplied: getOrCreateLabel("JobApps/Applied"),
+    IncomingRejected: getOrCreateLabel("JobApps/Rejected"),
+    IncomingInterview: getOrCreateLabel("JobApps/Interview"),
+    IncomingAssessment: getOrCreateLabel("JobApps/Assessment"),
+    IncomingOther: getOrCreateLabel("JobApps/Other"),
+    SentApplied: getOrCreateLabel("Sent/Applied"),
+    SentFollowUp: getOrCreateLabel("Sent/FollowUp"),
+    SentOther: getOrCreateLabel("Sent/Other"),
+    Processed: getOrCreateLabel("JobApps/Processed"),
+    SentProcessed: getOrCreateLabel("Sent/Processed"),
+  };
+
+  var counts = {
+    IncomingApplied: 0,
+    IncomingRejected: 0,
+    IncomingInterview: 0,
+    IncomingAssessment: 0,
+    IncomingOther: 0,
+    SentApplied: 0,
+    SentFollowUp: 0,
+    SentOther: 0,
+  };
+
+  var inbox = GmailApp.search("in:inbox -label:JobApps/Processed");
+  var sent = GmailApp.search("in:sent -label:Sent/Processed");
+
+  if (inbox.length === 0 && sent.length === 0) {
+    Logger.log("No work to do, exiting without spending tokens.");
+    return;
+  }
+
+  inbox.forEach(function (thread) {
+    var msg = thread.getMessages()[0];
+    var text = msg.getSubject() + "\n" + msg.getPlainBody();
+    var category = classifyIncoming(text);
+    var details = extractCourseDate(text);
+    var emailComp = "",
+      llmComp = "";
+    if (category !== "Other") {
+      emailComp = extractCompanyEmail(msg.getFrom());
+      llmComp = extractCompanyLLM(text);
+    }
+    var key = "Incoming" + category;
+    if (labels[key]) {
+      labels[key].addToThread(thread);
+      counts[key]++;
+    }
+    appendLog(
+      new Date().toISOString(),
+      "IN",
+      thread.getId(),
+      msg.getSubject(),
+      category,
+      emailComp,
+      llmComp,
+      details.course,
+      details.date
+    );
+    labels.Processed.addToThread(thread);
+    Utilities.sleep(120);
+  });
+
+  sent.forEach(function (thread) {
+    var msgs = thread.getMessages();
+    var sentMsg = msgs.reverse().find((m) => m.getFrom().includes(userEmail));
+    if (!sentMsg) return;
+    var text = sentMsg.getSubject() + "\n" + sentMsg.getPlainBody();
+    var category = classifyOutgoing(text);
+    var details = extractCourseDate(text);
+    var emailComp = "",
+      llmComp = "";
+    if (category === "Sent/FollowUp") {
+      emailComp = extractCompanyEmail(sentMsg.getTo());
+      llmComp = extractCompanyLLM(text);
+    }
+    var key = category.replace("Sent/", "Sent");
+    if (labels[key]) {
+      labels[key].addToThread(thread);
+      counts[key]++;
+    }
+    appendLog(
+      new Date().toISOString(),
+      "OUT",
+      thread.getId(),
+      sentMsg.getSubject(),
+      category,
+      emailComp,
+      llmComp,
+      details.course,
+      details.date
+    );
+    labels.SentProcessed.addToThread(thread);
+    Utilities.sleep(120);
+  });
+
+  appendSummaryLog(new Date().toISOString().slice(0, 10), counts);
+}
+
+/** Schedules processThreads every 12 Hours */
+function createScheduler() {
+  ScriptApp.newTrigger("processThreads").timeBased().everyHours(12).create();
+}
+
+/** Store API key once. */
+function storeApiKey() {}
